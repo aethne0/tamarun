@@ -61,12 +61,12 @@ func main() {
 	})))
 
 	r := redis.NewClient(&redis.Options{
-		Addr: "redis.service.consul",
+		Addr: "redis.service.consul:24982",
 		Password: "",
 		DB: 0,
 	})
 
-	client, err := minio.New("minio-s3.service.consul:", &minio.Options{
+	client, err := minio.New("minio-s3.service.consul:28360", &minio.Options{
         Creds:  credentials.NewStaticV4("minioadmin", "minioadmin", ""),
         Secure: false,
     })
@@ -118,12 +118,12 @@ func main() {
 func run(id uuid.UUID, script string) error {
 	jail := filepath.Join("/tmp", id.String())
 	
-	// 1. Prepare Workspace
+	// prepare workspace
 	os.MkdirAll(filepath.Join(jail, "app"), 0755)
 	os.WriteFile(filepath.Join(jail, "app/main.py"), []byte(script), 0644)
 
-	// 2. Bind Mount system deps so python3 exists in the jail
-	// We mount these from the host into the jail directory
+	// bind mount system deps so python3 exists in the jail
+	// we mount these from the host into the jail directory
 	sysDirs := []string{"/bin", "/lib", "/lib64", "/usr", "/sys"}
 	for _, dir := range sysDirs {
 		target := filepath.Join(jail, dir)
@@ -132,7 +132,7 @@ func run(id uuid.UUID, script string) error {
 			return fmt.Errorf("mount %s failed: %v", dir, err)
 		}
 	}
-	// Ensure we unmount everything when the function returns
+	// ensure we unmount everything when the function returns
 	defer func() {
 		for _, dir := range sysDirs {
 			syscall.Unmount(filepath.Join(jail, dir), 0)
@@ -140,13 +140,13 @@ func run(id uuid.UUID, script string) error {
 		os.RemoveAll(jail)
 	}()
 
-	// 3. Setup Cgroup v2
+	// setup cgroup v2
 	cgPath := filepath.Join("/sys/fs/cgroup", id.String())
 	os.Mkdir(cgPath, 0755)
 	defer os.Remove(cgPath) 
 	os.WriteFile(filepath.Join(cgPath, "memory.max"), []byte("128M"), 0644)
 
-	// 4. Define Command & Isolation
+	// define command & isolation
 	cmd := exec.Command("python3", "/app/main.py")
 	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1") // Prevents stdout lag
 	cmd.Stdout = os.Stdout
@@ -159,21 +159,23 @@ func run(id uuid.UUID, script string) error {
 		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 		Chroot:      jail,
-		Ptrace:      true, 
+		Ptrace:      true, // start paused
 	}
 	cmd.Dir = "/app"
 
-	// 5. Execution
+	// execution
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
-	// Move into cgroup while process is paused via Ptrace
-	os.WriteFile(filepath.Join(cgPath, "cgroup.procs"), []byte(fmt.Sprint(cmd.Process.Pid)), 0644)
+	// move into cgroup while process is paused via ptrace
+	os.WriteFile(
+		filepath.Join(cgPath, "cgroup.procs"),
+		fmt.Append(nil, cmd.Process.Pid),
+		0644,
+	)
 
-	//os.WriteFile(filepath.Join(cgPath, "cgroup.procs"), fmt.Append(cmd.Process.Pid), 0644)
-
-	// Fix: Use cmd.Process.Pid (ProcessState is nil until after Wait)
+	// use cmd.process.pid (processstate is nil until after wait)
 	err := syscall.PtraceDetach(cmd.Process.Pid)
 	if err != nil {
 		return fmt.Errorf("ptrace detach failed: %v", err)
