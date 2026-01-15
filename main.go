@@ -1,3 +1,31 @@
+/*
+import (
+    "context"
+    "fmt"
+    "net"
+    "github.com/minio/minio-go/v7"
+)
+
+func GetMinioClient() (*minio.Client, error) {
+    // 1. Resolve SRV record (e.g., from Consul/Nomad)
+    // Format: _service._proto.name.
+    _, addrs, err := net.LookupSRV("s3", "tcp", "minio-api.service.consul")
+    if err != nil || len(addrs) == 0 {
+        return nil, fmt.Errorf("could not find minio srv: %v", err)
+    }
+
+    // 2. Build the endpoint string using the target and port from the SRV record
+    // Use the first result (addrs[0])
+    endpoint := fmt.Sprintf("%s:%d", addrs[0].Target, addrs[0].Port)
+
+    // 3. Initialize client with the resolved endpoint
+    return minio.New(endpoint, &minio.Options{
+        Creds:  credentials.NewStaticV4("minioadmin", "minioadmin", ""),
+        Secure: false,
+    })
+}
+*/
+
 package main
 
 import (
@@ -13,6 +41,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lmittmann/tint"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/redis/go-redis/v9"
 	"github.com/zeebo/blake3"
 )
@@ -31,15 +61,31 @@ func main() {
 	})))
 
 	r := redis.NewClient(&redis.Options{
-		Addr: "10.2.16.6:24839",
+		Addr: "redis.service.consul",
 		Password: "",
 		DB: 0,
 	})
 
-	res, err := r.Ping(ctx).Result()
-	if err != nil {
-		slog.Warn("err", "err", err)
+	client, err := minio.New("minio-s3.service.consul:", &minio.Options{
+        Creds:  credentials.NewStaticV4("minioadmin", "minioadmin", ""),
+        Secure: false,
+    })
+	if err != nil { 
+		slog.Error("minio new", "err", err) 
+		os.Exit(-1)
 	}
+	bucketNames, err := client.ListBuckets(ctx)
+	if err != nil { 
+		slog.Error("minio listbuckets", "err", err) 
+		os.Exit(-1)
+	}
+	for i, b := range bucketNames {
+		slog.Debug("bucket-names", "i", i, "name", b.Name)
+	}
+
+
+	res, err := r.Ping(ctx).Result()
+	if err != nil { slog.Warn("err", "err", err) }
 
 	fmt.Println(res)
 
