@@ -29,6 +29,7 @@ func GetMinioClient() (*minio.Client, error) {
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -60,13 +61,13 @@ func main() {
 		TimeFormat: time.TimeOnly,
 	})))
 
-	r := redis.NewClient(&redis.Options{
+	redisC := redis.NewClient(&redis.Options{
 		Addr: "redis.service.consul:24982",
 		Password: "",
 		DB: 0,
 	})
 
-	client, err := minio.New("minio-s3.service.consul:28360", &minio.Options{
+	minioC, err := minio.New("minio-s3.service.consul:28360", &minio.Options{
         Creds:  credentials.NewStaticV4("minioadmin", "minioadmin", ""),
         Secure: false,
     })
@@ -74,42 +75,55 @@ func main() {
 		slog.Error("minio new", "err", err) 
 		os.Exit(-1)
 	}
-	bucketNames, err := client.ListBuckets(ctx)
-	if err != nil { 
-		slog.Error("minio listbuckets", "err", err) 
-		os.Exit(-1)
-	}
-	for i, b := range bucketNames {
-		slog.Debug("bucket-names", "i", i, "name", b.Name)
-	}
 
-
-	res, err := r.Ping(ctx).Result()
+	res, err := redisC.Ping(ctx).Result()
 	if err != nil { slog.Warn("err", "err", err) }
 
 	fmt.Println(res)
 
 	// "uploading"
 
-	scriptIn := `print("wew, lad!")`
+	scriptIn := `print("wew, lad!"); a = 3 + 4; print("wowee zowie {}".format(a))`
 	b := blake3.Sum256([]byte(scriptIn))
-	slog.Info("hashed-to", "hash", hex.EncodeToString(b[:]))
-	_, err = r.Get(ctx, hex.EncodeToString(b[:])).Result()
+	bs := hex.EncodeToString(b[:])
+
+
+	slog.Info("redis: hashed-to", "hash", bs)
+	_, err = redisC.Get(ctx, bs).Result()
 	if err != nil {
-		slog.Info("not found - setting", "hash", hex.EncodeToString(b[:]))
-		r.Set(ctx, hex.EncodeToString(b[:]), scriptIn, time.Hour)
+		slog.Info("redis: not found - caching", "hash", bs)
+		redisC.Set(ctx, bs, "pending", time.Minute)
+		_, err := minioC.PutObject(
+			ctx, 
+			"tamarun", 
+			bs,
+			bytes.NewReader([]byte(scriptIn)),
+			int64(len(scriptIn)),
+			minio.PutObjectOptions{},
+		)
+		if err != nil {
+			slog.Warn("err", "err", err)
+		}
+
+		redisC.Set(ctx, hex.EncodeToString(b[:]), "cached", time.Minute)
 	}
 
 	// "running"
 
-	retrieved := r.Get(ctx, hex.EncodeToString(b[:]))
+	retrieved := redisC.Get(ctx, hex.EncodeToString(b[:]))
 	s, err := retrieved.Result()
 	if err != nil {
 		slog.Warn("err", "err", err)
 	}
 
-	slog.Info("retrieved", "hash", hex.EncodeToString(b[:]), "content", s)
-	err = run(uuid.New(), s)
+	obj, _ := minioC.GetObject(ctx, "tamarun", bs, minio.GetObjectOptions{})
+	script := make([]byte, 128)
+	n, _ := obj.Read(script)
+	script = script[:n]
+
+	slog.Info("redis", "hash", hex.EncodeToString(b[:]), "content", s)
+	slog.Info("minio", "hash", hex.EncodeToString(b[:]), "content", string(script))
+	err = run(uuid.New(), string(script))
 	if err != nil {
 		slog.Warn("err", "err", err)
 	}
@@ -132,6 +146,7 @@ func run(id uuid.UUID, script string) error {
 			return fmt.Errorf("mount %s failed: %v", dir, err)
 		}
 	}
+
 	// ensure we unmount everything when the function returns
 	defer func() {
 		for _, dir := range sysDirs {
@@ -161,6 +176,7 @@ func run(id uuid.UUID, script string) error {
 		Chroot:      jail,
 		Ptrace:      true, // start paused
 	}
+
 	cmd.Dir = "/app"
 
 	// execution
